@@ -13,7 +13,7 @@ import (
 
 const (
 	appName    = "Luna Update Control"
-	appVersion = "v0.1 beta 1"
+	appVersion = "v0.2"
 	sep        = "=================================================="
 )
 
@@ -23,6 +23,14 @@ var updateServices = []string{
 	"WaaSMedicSvc",
 	"BITS",
 	"dosvc",
+}
+
+// Windows Modules Installer. Keep this on Manual when Windows Update is disabled.
+// TiWorker.exe is used by TrustedInstaller and should only run for explicit
+// servicing actions such as manual update installs, optional features, DISM/SFC,
+// or component changes. Do not hard-disable, rename, ACL-lock, or logon-lock it.
+var servicingServices = []string{
+	"TrustedInstaller",
 }
 
 var scheduledTasks = []string{
@@ -217,7 +225,7 @@ func showDetailedStatus() {
 	fmt.Println(sep)
 
 	fmt.Println("\n  Services:")
-	for _, svc := range updateServices {
+	for _, svc := range append(updateServices, servicingServices...) {
 		out, _ := runOut("sc", "qc", svc)
 		startType := "unknown"
 		for _, line := range strings.Split(out, "\n") {
@@ -228,6 +236,7 @@ func showDetailedStatus() {
 		}
 		fmt.Printf("    %-20s %s\n", svc, startType)
 	}
+	fmt.Println("    Note: TrustedInstaller is intentionally Manual, not hard-disabled.")
 
 	fmt.Println("\n  Executables (WaaSMedic):")
 	for _, path := range medicExes {
@@ -315,53 +324,56 @@ func disableUpdate() {
 	fmt.Println("  DISABLING WINDOWS UPDATE")
 	fmt.Println(sep)
 
-	fmt.Println("\n  [1/11] Stopping services...")
+	fmt.Println("\n  [1/13] Stopping Windows Update services...")
 	for _, svc := range updateServices {
 		run("sc", "stop", svc)
 		fmt.Printf("        Stopped: %s\n", svc)
 	}
 	time.Sleep(1 * time.Second)
 
-	fmt.Println("\n  [2/11] Disabling services...")
+	fmt.Println("\n  [2/13] Disabling Windows Update services...")
 	for _, svc := range updateServices {
 		run("sc", "config", svc, "start=", "disabled")
 		fmt.Printf("        Disabled: %s\n", svc)
 	}
 
+	fmt.Println("\n  [3/13] Keeping Windows Modules Installer manual-only...")
+	setTrustedInstallerManual()
+
 	// Lock the WaaSMedicSvc registry key BEFORE writing Start=4.
 	// If we write Start=4 first, WaaSMedic may race and flip it back to 3
 	// before we get a chance to deny SYSTEM write access.
-	fmt.Println("\n  [3/11] Locking WaaSMedicSvc registry key permissions...")
+	fmt.Println("\n  [4/13] Locking WaaSMedicSvc registry key permissions...")
 	lockWaaSMedicRegistryPerms()
 
-	fmt.Println("\n  [4/11] Neutralizing WaaSMedic (self-healing blocker)...")
+	fmt.Println("\n  [5/13] Neutralizing WaaSMedic (self-healing blocker)...")
 	killWaaSMedic()
 
-	fmt.Println("\n  [5/11] Applying registry blocks...")
+	fmt.Println("\n  [6/13] Applying registry blocks...")
 	applyRegistry()
 
-	fmt.Println("\n  [6/11] Verifying WaaSMedicSvc Start value is still 4...")
+	fmt.Println("\n  [7/13] Verifying WaaSMedicSvc Start value is still 4...")
 	verifyWaaSMedicStartValue()
 
-	fmt.Println("\n  [7/11] Hiding Windows Update from Settings...")
+	fmt.Println("\n  [8/13] Hiding Windows Update from Settings...")
 	hideSettingsPage()
 
-	fmt.Println("\n  [8/11] Disabling scheduled tasks...")
+	fmt.Println("\n  [9/13] Disabling scheduled tasks...")
 	for _, task := range scheduledTasks {
 		run("schtasks", "/Change", "/TN", task, "/DISABLE")
 	}
 	fmt.Println("        Done.")
 
-	fmt.Println("\n  [9/11] Changing service logon accounts (logon-lock)...")
+	fmt.Println("\n  [10/13] Changing service logon accounts (logon-lock)...")
 	lockServiceLogon()
 
-	fmt.Println("\n  [10/11] Locking service ACLs...")
+	fmt.Println("\n  [11/13] Locking service ACLs...")
 	lockServiceACLs()
 
-	fmt.Println("\n  [11/12] Locking registry key ACLs...")
+	fmt.Println("\n  [12/13] Locking registry key ACLs...")
 	lockRegistryACLs()
 
-	fmt.Println("\n  [12/12] Disabling Edge Update...")
+	fmt.Println("\n  [13/13] Disabling Edge Update...")
 	disableEdgeUpdate()
 
 	fmt.Println()
@@ -375,19 +387,19 @@ func enableUpdate() {
 	fmt.Println("  RESTORING WINDOWS UPDATE")
 	fmt.Println(sep)
 
-	fmt.Println("\n  [1/11] Restoring registry key ACLs...")
+	fmt.Println("\n  [1/13] Restoring registry key ACLs...")
 	unlockRegistryACLs()
 
-	fmt.Println("\n  [2/11] Restoring WaaSMedicSvc registry key permissions...")
+	fmt.Println("\n  [2/13] Restoring WaaSMedicSvc registry key permissions...")
 	unlockWaaSMedicRegistryPerms()
 
-	fmt.Println("\n  [3/11] Restoring service ACLs...")
+	fmt.Println("\n  [3/13] Restoring service ACLs...")
 	unlockServiceACLs()
 
-	fmt.Println("\n  [4/11] Restoring service logon accounts...")
+	fmt.Println("\n  [4/13] Restoring service logon accounts...")
 	unlockServiceLogon()
 
-	fmt.Println("\n  [5/11] Re-enabling services...")
+	fmt.Println("\n  [5/13] Re-enabling Windows Update services...")
 	for _, svc := range updateServices {
 		startType := "demand"
 		if svc == "BITS" || svc == "dosvc" {
@@ -397,36 +409,53 @@ func enableUpdate() {
 		fmt.Printf("        Enabled: %s\n", svc)
 	}
 
-	fmt.Println("\n  [6/11] Starting services...")
+	fmt.Println("\n  [6/13] Restoring Windows Modules Installer manual start...")
+	setTrustedInstallerManual()
+
+	fmt.Println("\n  [7/13] Starting services...")
 	for _, svc := range []string{"BITS", "wuauserv", "UsoSvc", "dosvc"} {
 		run("sc", "start", svc)
 		fmt.Printf("        Started: %s\n", svc)
 	}
 
-	fmt.Println("\n  [7/11] Restoring WaaSMedic executables...")
+	fmt.Println("\n  [8/13] Restoring WaaSMedic executables...")
 	restoreWaaSMedic()
 
-	fmt.Println("\n  [8/11] Removing registry blocks...")
+	fmt.Println("\n  [9/13] Removing registry blocks...")
 	removeRegistry()
 
-	fmt.Println("\n  [9/11] Restoring Windows Update in Settings...")
+	fmt.Println("\n  [10/13] Restoring Windows Update in Settings...")
 	showSettingsPage()
 
-	fmt.Println("\n  [10/11] Re-enabling scheduled tasks...")
+	fmt.Println("\n  [11/13] Re-enabling scheduled tasks...")
 	for _, task := range scheduledTasks {
 		run("schtasks", "/Change", "/TN", task, "/ENABLE")
 	}
 	fmt.Println("        Done.")
 
-	fmt.Println("\n  [11/12] Starting WaaSMedicSvc...")
+	fmt.Println("\n  [12/13] Starting WaaSMedicSvc...")
 	run("sc", "start", "WaaSMedicSvc")
 	fmt.Println("        Done.")
 
-	fmt.Println("\n  [12/12] Restoring Edge Update...")
+	fmt.Println("\n  [13/13] Restoring Edge Update...")
 	enableEdgeUpdate()
 
 	fmt.Println()
 	fmt.Println("   Windows Update has been restored.")
+}
+
+// ── Windows Modules Installer / TiWorker ─────────────────────────────────────
+
+func setTrustedInstallerManual() {
+	// TrustedInstaller owns Windows component servicing. TiWorker.exe runs under
+	// this service when servicing is explicitly requested by the user or tools.
+	// Keep it Manual so automatic update scans do not require it, but manual
+	// installs, optional features, DISM/SFC, and component changes still work.
+	for _, svc := range servicingServices {
+		run("sc", "stop", svc)
+		run("sc", "config", svc, "start=", "demand")
+		fmt.Printf("        Manual-only: %s (TiWorker allowed only for explicit servicing)\n", svc)
+	}
 }
 
 // ── WaaSMedic ─────────────────────────────────────────────────────────────────
@@ -1036,8 +1065,6 @@ func enableEdgeUpdate() {
 	}
 	fmt.Println("        EdgeUpdate folder restored.")
 }
-
-
 
 func run(name string, args ...string) {
 	cmd := exec.Command(name, args...)
